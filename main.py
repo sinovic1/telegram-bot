@@ -97,7 +97,7 @@ async def monitor_loop():
     global last_activity_time
     while True:
         if datetime.utcnow() - last_activity_time > timedelta(minutes=WARNING_THRESHOLD):
-            await bot.send_message(chat_id=USER_ID, text=⚠️ Warning: Bot seems to be stuck or delayed!")
+            await bot.send_message(chat_id=USER_ID, text="⚠️ Warning: Bot seems to be stuck or delayed!")
         await asyncio.sleep(60)
 
 async def check_loop():
@@ -117,5 +117,3 @@ async def on_startup(_):
 
 if __name__ == "__main__":
     executor.start_polling(dp, on_startup=on_startup)
-
-
