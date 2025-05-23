@@ -2,6 +2,6 @@ flask
 pandas
 yfinance
 aiogram==3.3.0
-pydantic==2.5.3
-pydantic-core==2.14.6
+pydantic==2.5.2
+pydantic-core==2.14.5
 
