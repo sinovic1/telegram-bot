@@ -34,7 +34,7 @@ def fetch_data(symbol):
     loss = -delta.clip(upper=0)
     rs = gain.rolling(14).mean() / loss.rolling(14).mean()
     df["RSI"] = 100 - (100 / (1 + rs))
-    std = close.rolling(20).std()
+    std = close.rolling(20).std()  # ✅ FIXED: Now it's a Series, not a DataFrame
     df["UpperBB"] = df["EMA20"] + 2 * std
     df["LowerBB"] = df["EMA20"] - 2 * std
     df["MACD"] = close.ewm(span=12).mean() - close.ewm(span=26).mean()
@@ -117,4 +117,5 @@ async def on_startup(_):
 
 if __name__ == "__main__":
     executor.start_polling(dp, on_startup=on_startup)
+
 
