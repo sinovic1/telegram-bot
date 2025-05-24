@@ -32,14 +32,14 @@ def run_web():
     app.run(host="0.0.0.0", port=8080)
 threading.Thread(target=run_web).start()
 
-# Trading strategy check (very basic for now)
+# Trading strategy check
 def check_strategy(data):
     close = data["Close"]
     if len(close) < 5:
         return False
     return close[-1] > close[-2] and close[-2] > close[-3]
 
-# Loop checker for trading
+# Loop checker
 async def loop_checker():
     global last_check_time
     try:
@@ -54,11 +54,6 @@ async def loop_checker():
     except Exception as e:
         logger.error(f"Error while checking {symbol}: {e}")
 
-# APScheduler
-scheduler = AsyncIOScheduler()
-scheduler.add_job(loop_checker, "interval", minutes=1)
-scheduler.start()
-
 # /status command
 @dp.message(lambda message: message.text == "/status" and message.from_user.id == ALLOWED_USER_ID)
 async def status_handler(message: types.Message):
@@ -66,14 +61,20 @@ async def status_handler(message: types.Message):
     status = "✅ Everything is working fine." if delay < 120 else "⚠️ Warning: Loop may be frozen!"
     await message.answer(status)
 
-# Start polling
+# Start bot
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     logger.info("✅ Webhook cleared")
+
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(loop_checker, "interval", minutes=1)
+    scheduler.start()
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
