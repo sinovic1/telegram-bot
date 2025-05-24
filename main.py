@@ -1,65 +1,73 @@
-import logging
 import asyncio
-from datetime import datetime
-import yfinance as yf
-from aiogram import Bot, Dispatcher, types
+import logging
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import Message
+from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+import yfinance as yf
 from flask import Flask
-from threading import Thread
+import threading
 
 API_TOKEN = "7923000946:AAGkHu782eQXxhLF4IU1yNCyJO5ruXZhUtc"
-ALLOWED_USER_ID = 7469299312  # Hassan's Telegram ID
+AUTHORIZED_USER_ID = 7469299312  # Your Telegram user ID
 
+# Logging
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# Bot setup
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+
+# Flask app for UptimeRobot ping
 app = Flask(__name__)
 
-@app.route("/")
+@app.route('/')
 def home():
-    return "✅ Bot is running", 200
+    return "✅ Bot is alive"
 
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(storage=MemoryStorage())
-scheduler = AsyncIOScheduler()
-
-# Simple status command
-@dp.message(lambda msg: msg.text == "/status" and msg.from_user.id == ALLOWED_USER_ID)
-async def status_handler(message: types.Message):
-    await message.answer("✅ Bot is running fine!")
-
-# Your trading logic here
-def check_strategies():
-    pair = "EURUSD=X"
-    try:
-        logging.info(f"🔄 Checking market at {datetime.utcnow().isoformat()}")
-        df = yf.download(pair, period="1d", interval="1m")
-        if df.empty:
-            raise ValueError("Empty data")
-        # Placeholder: Replace with real strategy logic
-        print("✅ Market checked successfully.")
-    except Exception as e:
-        logging.error(f"Error while checking {pair}: {e}")
-
-def loop_checker():
-    asyncio.run(check_strategies())
-
-scheduler.add_job(loop_checker, IntervalTrigger(minutes=1))
-
-async def start_bot():
-    scheduler.start()
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-def start_flask():
+def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
+# Status command
+@dp.message(F.text == "/status")
+async def status_handler(message: Message):
+    if message.from_user.id == AUTHORIZED_USER_ID:
+        await message.answer("✅ Bot is running and healthy.")
+    else:
+        await message.answer("⛔ Unauthorized.")
+
+# Strategy checking (simplified placeholder)
+async def check_strategies():
+    logger.info("🔄 Checking market...")
+    try:
+        data = yf.download("EURUSD=X", period="1d", interval="1m")
+        if data.empty:
+            logger.error("No data received.")
+            return
+        # Implement your signal logic here
+        logger.info("✅ Market checked successfully.")
+    except Exception as e:
+        logger.error(f"Error while checking EURUSD=X: {e}")
+
+# APScheduler setup
+scheduler = AsyncIOScheduler()
+
+async def loop_checker():
+    await check_strategies()
+
+async def start_bot():
+    scheduler.add_job(lambda: asyncio.create_task(loop_checker()), trigger=IntervalTrigger(minutes=1))
+    scheduler.start()
+    logger.info("✅ Scheduler started.")
+    await dp.start_polling(bot)
+
 if __name__ == "__main__":
-    flask_thread = Thread(target=start_flask)
-    flask_thread.start()
+    threading.Thread(target=run_flask).start()
     asyncio.run(start_bot())
+
 
 
 
