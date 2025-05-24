@@ -1,69 +1,84 @@
 import os
-import asyncio
 import logging
-import yfinance as yf
-from aiogram import Bot, Dispatcher, Router, F
-from aiogram.types import Message, BotCommand
+import asyncio
+from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
+from aiogram.types import Message
+from aiogram.client.default import DefaultBotProperties
 from aiogram.exceptions import TelegramConflictError
+import yfinance as yf
+import pandas as pd
+from flask import Flask
+from threading import Thread
 
-API_TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
-USER_ID = 7469299312
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+# Environment variables
+API_TOKEN = os.getenv("API_TOKEN")
+USER_ID = int(os.getenv("USER_ID"))
+
+# Bot setup
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
-router = Router()
-dp.include_router(router)
 
-async def clear_webhook():
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Webhook cleared successfully")
-    except Exception as e:
-        print(f"❌ Failed to clear webhook: {e}")
+# Status command
+@dp.message(lambda message: message.text == "/status")
+async def status_handler(message: Message):
+    if message.from_user.id != USER_ID:
+        return
+    await message.answer("✅ Bot is still running and monitoring the market.")
 
-@router.message(F.text == "/status")
-async def status_command(message: Message):
-    if message.chat.id == USER_ID:
-        await message.answer("✅ Bot is running and monitoring the market.")
+# Background Flask app to keep instance alive
+app = Flask(__name__)
+@app.route("/")
+def home():
+    return "Bot is running!"
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
 
-def get_signal():
-    try:
-        data = yf.download("EURUSD=X", period="1d", interval="15m")
-        if data.empty:
-            return None
-        latest = data.iloc[-1]
-        return f"<b>EUR/USD Signal</b>\nClose: {latest['Close']:.5f}"
-    except Exception as e:
-        logging.error(f"Error while checking EURUSD=X: {e}")
-        return None
-
-async def send_alert():
-    signal = get_signal()
-    if signal:
-        await bot.send_message(chat_id=USER_ID, text=signal)
-
-async def monitor():
+# Example signal-checking logic
+async def check_signals():
     while True:
         try:
-            await send_alert()
-            await asyncio.sleep(900)
+            ticker = yf.download("EURUSD=X", period="1d", interval="15m")
+            if ticker.empty:
+                logging.error("EURUSD=X Error: No data")
+                await asyncio.sleep(60)
+                continue
+
+            # Example basic strategy
+            close = ticker["Close"]
+            if close.iloc[-1] > close.mean():
+                await bot.send_message(USER_ID, "📈 Signal: Buy EUR/USD")
+            else:
+                await bot.send_message(USER_ID, "📉 Signal: Sell EUR/USD")
+
         except Exception as e:
-            logging.error(f"Monitoring error: {e}")
-            await asyncio.sleep(30)
+            logging.error(f"Error while checking EURUSD=X: {e}")
 
+        await asyncio.sleep(300)
+
+# Main bot loop
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    await clear_webhook()
-    await bot.set_my_commands([BotCommand(command="status", description="Check bot status")])
-    asyncio.create_task(monitor())
     try:
-        await dp.start_polling(bot)
-    except TelegramConflictError:
-        logging.error("❗ Another instance of the bot is already polling Telegram.")
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("✅ Webhook cleared successfully")
 
-if __name__ == '__main__':
+        flask_thread = Thread(target=run_flask)
+        flask_thread.start()
+
+        signal_task = asyncio.create_task(check_signals())
+        await dp.start_polling(bot)
+        await signal_task
+    except TelegramConflictError:
+        logging.error("❌ Another bot instance is running. Stop it before starting a new one.")
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
+
+if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
