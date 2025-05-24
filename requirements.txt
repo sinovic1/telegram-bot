@@ -1,4 +1,5 @@
-flask
+aiogram==3.3.0
 pandas
 yfinance
-aiogram==2.25.1
+flask
+
