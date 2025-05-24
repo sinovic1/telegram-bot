@@ -1,5 +1,8 @@
-aiogram==3.2.0
-yfinance
-apscheduler
-flask
+aiogram==3.4.1
+Flask==2.2.5
+apscheduler==3.10.4
+yfinance==0.2.37
+pandas==2.2.2
+numpy==1.26.4
+aiohttp==3.9.3
 

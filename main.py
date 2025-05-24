@@ -3,26 +3,28 @@ import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.types import Message
+from aiogram.filters import Command
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import yfinance as yf
-import os
 
-# 🔐 Forced bot token
 API_TOKEN = "7923000946:AAGkHu782eQXxhLF4IU1yNCyJO5ruXZhUtc"
-
-# Only allow this Telegram user ID to interact
 ALLOWED_USER_ID = 7469299312
 
-# 📊 Strategy functions
+# Logging
+logging.basicConfig(level=logging.INFO)
+
+# Bot and Dispatcher
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
+
+# Strategy logic
 def get_signals(data):
     signals = []
 
-    # EMA Strategy
     data["EMA20"] = data["Close"].ewm(span=20, adjust=False).mean()
     ema_signal = "buy" if data["Close"].iloc[-1] > data["EMA20"].iloc[-1] else "sell"
 
-    # RSI Strategy
     delta = data["Close"].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -32,14 +34,12 @@ def get_signals(data):
     data["RSI"] = 100 - (100 / (1 + rs))
     rsi_signal = "buy" if data["RSI"].iloc[-1] < 30 else "sell" if data["RSI"].iloc[-1] > 70 else "hold"
 
-    # MACD
     exp1 = data["Close"].ewm(span=12, adjust=False).mean()
     exp2 = data["Close"].ewm(span=26, adjust=False).mean()
     macd = exp1 - exp2
     signal = macd.ewm(span=9, adjust=False).mean()
     macd_signal = "buy" if macd.iloc[-1] > signal.iloc[-1] else "sell"
 
-    # Bollinger Bands
     data["SMA20"] = data["Close"].rolling(window=20).mean()
     data["Upper"] = data["SMA20"] + 2 * data["Close"].rolling(window=20).std()
     data["Lower"] = data["SMA20"] - 2 * data["Close"].rolling(window=20).std()
@@ -53,10 +53,8 @@ def get_signals(data):
         return "BUY"
     elif signals.count("sell") >= 2:
         return "SELL"
-    else:
-        return None
+    return None
 
-# 📤 Send signal to Telegram
 async def send_signal(bot, action, price):
     tp1 = round(price * (1.01 if action == "BUY" else 0.99), 5)
     tp2 = round(price * (1.02 if action == "BUY" else 0.98), 5)
@@ -73,12 +71,10 @@ async def send_signal(bot, action, price):
     )
     await bot.send_message(ALLOWED_USER_ID, msg, parse_mode=ParseMode.HTML)
 
-# 🔄 Periodic loop
+# Background loop
 async def loop_checker():
     try:
-        now = datetime.utcnow().isoformat()
-        print(f"🔄 Checking market at {now}")
-
+        print(f"🔄 Checking market at {datetime.utcnow().isoformat()}")
         data = yf.download("EURUSD=X", period="30m", interval="1m", progress=False, auto_adjust=True)
         if data.empty:
             return
@@ -89,27 +85,20 @@ async def loop_checker():
     except Exception as e:
         logging.error(f"Error while checking EURUSD=X: {e}")
 
-# ✅ /status command
+# /status command handler
+@dp.message(Command("status"))
 async def status_handler(message: Message):
     if message.from_user.id != ALLOWED_USER_ID:
         return
-    await message.answer("✅ Bot is running and checking signals!")
+    await message.answer("✅ Bot is running and monitoring!")
 
-# 🧠 Setup
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
-
-dp.message.register(status_handler, commands={"status"})
-
-scheduler = AsyncIOScheduler()
-scheduler.add_job(loop_checker, "interval", minutes=1)
-scheduler.start()
-
-# 🚀 Start polling
+# Main entry point
 async def main():
     print("✅ Webhook cleared")
     await bot.delete_webhook(drop_pending_updates=True)
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(loop_checker, "interval", minutes=1)
+    scheduler.start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
