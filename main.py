@@ -8,13 +8,13 @@ from keep_alive import keep_alive
 import os
 from datetime import datetime, timedelta
 
-# ========== CONFIG ==========
+# === CONFIG ===
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 USER_ID = int(os.getenv("TELEGRAM_USER_ID"))
 PAIRS = [("EURUSD=X", "Yggdrag")]
-CHECK_INTERVAL = 60  # seconds
-WARNING_THRESHOLD = 5  # minutes
-# ============================
+CHECK_INTERVAL = 60
+WARNING_THRESHOLD = 5
+# ==============
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=TOKEN)
@@ -28,13 +28,13 @@ def fetch_data(symbol):
     if df.empty or "Close" not in df:
         raise ValueError("No data found.")
     close = df["Close"]
-    df["EMA20"] = close.ewm(span=20, adjust=False).mean()
+    df["EMA20"] = close.ewm(span=20).mean()
     delta = close.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
     rs = gain.rolling(14).mean() / loss.rolling(14).mean()
     df["RSI"] = 100 - (100 / (1 + rs))
-    std = close.rolling(20).std()  # ✅ FIXED: Now it's a Series, not a DataFrame
+    std = close.rolling(20).std()
     df["UpperBB"] = df["EMA20"] + 2 * std
     df["LowerBB"] = df["EMA20"] - 2 * std
     df["MACD"] = close.ewm(span=12).mean() - close.ewm(span=26).mean()
@@ -59,9 +59,9 @@ def analyze(df):
         signals.append("Bollinger Sell")
     return signals, round(last["Close"], 5)
 
-async def send_signal(pair_info):
+async def send_signal(pair):
     global last_activity_time
-    symbol, name = pair_info
+    symbol, name = pair
     try:
         df = fetch_data(symbol)
         signals, price = analyze(df)
@@ -78,7 +78,7 @@ async def send_signal(pair_info):
             tp2 = round(price + 0.0040, 5) if signal_type == "Buy" else round(price - 0.0040, 5)
             tp3 = round(price + 0.0060, 5) if signal_type == "Buy" else round(price - 0.0060, 5)
             sl = round(price - 0.0020, 5) if signal_type == "Buy" else round(price + 0.0020, 5)
-            message = (
+            msg = (
                 f"📊 <b>{name} Signal</b>\n"
                 f"<b>Type:</b> {signal_type}\n"
                 f"<b>Entry:</b> {price}\n"
@@ -88,7 +88,7 @@ async def send_signal(pair_info):
                 f"<b>SL:</b> {sl}\n"
                 f"<b>Agreed Strategies:</b> {agreed}/4"
             )
-            await bot.send_message(chat_id=USER_ID, text=message, parse_mode="HTML")
+            await bot.send_message(chat_id=USER_ID, text=msg, parse_mode="HTML")
         last_activity_time = datetime.utcnow()
     except Exception as e:
         logging.error(f"{symbol} Error: {e}")
@@ -102,14 +102,14 @@ async def monitor_loop():
 
 async def check_loop():
     while True:
-        for pair in PAIRS:
-            await send_signal(pair)
+        for p in PAIRS:
+            await send_signal(p)
         await asyncio.sleep(CHECK_INTERVAL)
 
 @dp.message_handler(commands=["status"])
-async def status_command(message: types.Message):
+async def handle_status(message: types.Message):
     if message.from_user.id == USER_ID:
-        await message.answer("✅ Bot is still running and monitoring the market.")
+        await message.reply("✅ Bot is still running and monitoring the market.")
 
 async def on_startup(_):
     asyncio.create_task(check_loop())
@@ -117,5 +117,6 @@ async def on_startup(_):
 
 if __name__ == "__main__":
     executor.start_polling(dp, on_startup=on_startup)
+
 
 
