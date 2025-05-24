@@ -1,78 +1,109 @@
 import logging
 import asyncio
+import yfinance as yf
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
+from aiogram.fsm.strategy import FSMStrategy
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.interval import IntervalTrigger
-import yfinance as yf
 from datetime import datetime
-import time
+from flask import Flask
+import threading
 
-# Hardcoded user ID and token
-API_TOKEN = '7923000946:AAHMosNsaHU1Oz-qTihaWlMDYqCV2vhHT1E'
-USER_ID = 7469299312
+# 🔒 Your hard-coded credentials (safe only for testing, don’t expose in public!)
+API_TOKEN = "7923000946:AAHMosNsaHU1Oz-qTihaWlMDYqCV2vhHT1E"
+USER_ID = 7469299312  # Replace if different
 
-# Enable logging
+# Initialize logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize bot and dispatcher
+# Setup bot
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
+dp = Dispatcher(fsm_strategy=FSMStrategy.CHAT)
 
-# Status command handler
-@dp.message(lambda message: message.text == "/status")
-async def status_handler(message: types.Message):
-    if message.from_user.id == USER_ID:
-        await message.answer("✅ Bot is running and monitoring the market.")
-    else:
-        await message.answer("❌ Unauthorized access.")
+# Setup Flask app to keep Koyeb alive
+app = Flask(__name__)
 
-# Dummy market checking function (you can replace with real logic)
-async def check_market():
-    now = datetime.utcnow().isoformat()
-    logger.info(f"🔄 Checking market at {now}")
-    # Simulate logic
+@app.route('/')
+def home():
+    return "Bot is alive!"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+# Track last signal time for health check
+last_signal_time = None
+
+# Strategies (simplified example)
+def check_signals():
+    global last_signal_time
     try:
-        data = yf.download("EURUSD=X", period="1d", interval="1m")
-        if not data.empty:
-            logger.info("✅ Market data fetched.")
-        else:
-            logger.warning("⚠️ Market data is empty.")
+        df = yf.download("EURUSD=X", period="1d", interval="1m")
+        if df.empty:
+            return None
+
+        close = df["Close"]
+        ema = close.ewm(span=10).mean()
+        rsi = 100 - (100 / (1 + (close.diff().clip(lower=0).rolling(14).mean() /
+                                close.diff().clip(upper=0).abs().rolling(14).mean())))
+
+        signal = []
+
+        if rsi.iloc[-1] < 30 and close.iloc[-1] > ema.iloc[-1]:
+            signal.append("BUY")
+
+        if rsi.iloc[-1] > 70 and close.iloc[-1] < ema.iloc[-1]:
+            signal.append("SELL")
+
+        if len(signal) >= 2:
+            last_signal_time = datetime.utcnow()
+            entry = close.iloc[-1]
+            tp1 = round(entry * 1.002, 5)
+            tp2 = round(entry * 1.004, 5)
+            tp3 = round(entry * 1.006, 5)
+            sl = round(entry * 0.996, 5)
+            return f"""
+📈 <b>EUR/USD Signal</b>
+Type: <b>{signal[0]}</b>
+Entry: <b>{entry}</b>
+TP1: <b>{tp1}</b>
+TP2: <b>{tp2}</b>
+TP3: <b>{tp3}</b>
+SL: <b>{sl}</b>
+"""
     except Exception as e:
-        logger.error(f"Error fetching market data: {e}")
+        logger.error(f"Error while checking EURUSD=X: {e}")
+    return None
 
-# Check if polling is running by sending a message every X minutes
-last_check = time.time()
+# Status command
+@dp.message(lambda msg: msg.text == "/status" and msg.from_user.id == USER_ID)
+async def status_handler(message: types.Message):
+    await message.answer("✅ Bot is running and monitoring the market.")
 
-async def loop_checker():
-    global last_check
-    if time.time() - last_check > 180:  # 3 minutes without activity
-        try:
-            await bot.send_message(USER_ID, "⚠️ Bot might be stuck or delayed!")
-        except Exception as e:
-            logger.error(f"Failed to send warning: {e}")
-    else:
-        logger.info("🟢 Bot is alive.")
-    last_check = time.time()
-
+# Main loop
 async def main():
-    # Clear webhook to avoid conflict
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook cleared")
     except Exception as e:
-        logger.warning(f"Failed to clear webhook: {e}")
+        logger.warning(f"Webhook clear failed: {e}")
 
-    # Start polling
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(check_market, IntervalTrigger(minutes=1))
-    scheduler.add_job(loop_checker, IntervalTrigger(minutes=1))
+    
+    async def loop_checker():
+        logger.info(f"🔄 Checking market at {datetime.utcnow().isoformat()}")
+        signal = check_signals()
+        if signal:
+            await bot.send_message(USER_ID, signal, parse_mode=ParseMode.HTML)
+
+    scheduler.add_job(loop_checker, "interval", minutes=1)
     scheduler.start()
 
     await dp.start_polling(bot)
 
+# Start everything
 if __name__ == "__main__":
+    threading.Thread(target=run_flask).start()
     asyncio.run(main())
 
 
