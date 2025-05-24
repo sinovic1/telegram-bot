@@ -2,82 +2,66 @@ import os
 import logging
 import asyncio
 from aiogram import Bot, Dispatcher, types
-from aiogram.enums import ParseMode
-from aiogram.types import Message
-from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramConflictError
-import yfinance as yf
-import pandas as pd
+from aiogram.types import ParseMode
+from aiogram.utils import executor
+from aiogram.utils.exceptions import TelegramAPIError
 from flask import Flask
 from threading import Thread
+import yfinance as yf
 
-# Setup logging
+# Enable logging
 logging.basicConfig(level=logging.INFO)
 
 # Environment variables
 API_TOKEN = os.getenv("API_TOKEN")
 USER_ID = int(os.getenv("USER_ID"))
 
-# Bot setup
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+# Bot and dispatcher setup
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher(bot)
 
-# Status command
-@dp.message(lambda message: message.text == "/status")
-async def status_handler(message: Message):
-    if message.from_user.id != USER_ID:
-        return
-    await message.answer("✅ Bot is still running and monitoring the market.")
-
-# Background Flask app to keep instance alive
+# Flask app to keep Koyeb instance alive
 app = Flask(__name__)
 @app.route("/")
-def home():
+def index():
     return "Bot is running!"
 def run_flask():
     app.run(host="0.0.0.0", port=8080)
 
-# Example signal-checking logic
+# Status command
+@dp.message_handler(commands=['status'])
+async def status_handler(message: types.Message):
+    if message.from_user.id != USER_ID:
+        return
+    await message.reply("✅ Bot is still running and monitoring the market.")
+
+# Background task for signals
 async def check_signals():
+    await bot.delete_webhook(drop_pending_updates=True)
     while True:
         try:
-            ticker = yf.download("EURUSD=X", period="1d", interval="15m")
-            if ticker.empty:
-                logging.error("EURUSD=X Error: No data")
-                await asyncio.sleep(60)
-                continue
-
-            # Example basic strategy
-            close = ticker["Close"]
-            if close.iloc[-1] > close.mean():
-                await bot.send_message(USER_ID, "📈 Signal: Buy EUR/USD")
+            data = yf.download("EURUSD=X", period="1d", interval="15m")
+            if data.empty:
+                logging.warning("No data received for EURUSD=X.")
             else:
-                await bot.send_message(USER_ID, "📉 Signal: Sell EUR/USD")
-
+                last_price = data["Close"].iloc[-1]
+                avg_price = data["Close"].mean()
+                if last_price > avg_price:
+                    await bot.send_message(USER_ID, "📈 Signal: Buy EUR/USD")
+                else:
+                    await bot.send_message(USER_ID, "📉 Signal: Sell EUR/USD")
         except Exception as e:
             logging.error(f"Error while checking EURUSD=X: {e}")
-
         await asyncio.sleep(300)
 
-# Main bot loop
-async def main():
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logging.info("✅ Webhook cleared successfully")
+# Start everything
+async def on_startup(dp):
+    loop = asyncio.get_event_loop()
+    loop.create_task(check_signals())
+    Thread(target=run_flask).start()
 
-        flask_thread = Thread(target=run_flask)
-        flask_thread.start()
-
-        signal_task = asyncio.create_task(check_signals())
-        await dp.start_polling(bot)
-        await signal_task
-    except TelegramConflictError:
-        logging.error("❌ Another bot instance is running. Stop it before starting a new one.")
-    except Exception as e:
-        logging.error(f"Unexpected error: {e}")
-
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
 
 
 
