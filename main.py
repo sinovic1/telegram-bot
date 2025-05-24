@@ -4,18 +4,18 @@ import time
 import pandas as pd
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
-from aiogram.utils.exceptions import TelegramAPIError
 from flask import Flask
 import threading
 import yfinance as yf
 
-# ✅ Hardcoded credentials
+# ✅ Hardcoded Telegram bot info
 API_TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
 USER_ID = 7469299312
 
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
+# === FLASK SERVER ===
 app = Flask(__name__)
 
 @app.route('/')
@@ -25,8 +25,8 @@ def home():
 # === STRATEGIES ===
 def rsi_strategy(df):
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    gain = delta.where(delta > 0, 0).rolling(window=14).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     return df['RSI'].iloc[-1] < 30 or df['RSI'].iloc[-1] > 70
@@ -53,11 +53,10 @@ def bollinger_strategy(df):
 async def check_signals():
     pairs = ["EURUSD=X"]
     while True:
-        try:
-            for symbol in pairs:
+        for symbol in pairs:
+            try:
                 df = yf.download(symbol, interval="5m", period="1d")
                 if df.empty or 'Close' not in df:
-                    logging.error(f"{symbol} Error: No close data")
                     continue
 
                 signals = []
@@ -68,7 +67,7 @@ async def check_signals():
 
                 if len(signals) >= 2:
                     price = df['Close'].iloc[-1]
-                    msg = (
+                    message = (
                         f"📊 <b>Signal for {symbol.replace('=X', '')}</b>\n\n"
                         f"📈 Entry: <b>{price:.4f}</b>\n"
                         f"🎯 Take Profit 1: <b>{price * 1.002:.4f}</b>\n"
@@ -77,17 +76,14 @@ async def check_signals():
                         f"🛑 Stop Loss: <b>{price * 0.998:.4f}</b>\n"
                         f"🧠 Strategies: {', '.join(signals)}"
                     )
-                    await bot.send_message(chat_id=USER_ID, text=msg)
-
-            await asyncio.sleep(300)  # every 5 minutes
-
-        except Exception as e:
-            logging.exception(f"Signal check failed: {e}")
-            await bot.send_message(chat_id=USER_ID, text="⚠️ Bot encountered an error.")
+                    await bot.send_message(chat_id=USER_ID, text=message)
+            except Exception as e:
+                print(f"Error while checking {symbol}: {e}")
+        await asyncio.sleep(300)  # Wait 5 minutes
 
 # === STATUS COMMAND ===
 @dp.message()
-async def cmd_status(message: types.Message):
+async def handle_status(message: types.Message):
     if message.chat.id == USER_ID and message.text.lower() == "status":
         await message.answer("✅ Bot is running and monitoring the market.")
 
@@ -104,10 +100,11 @@ async def main():
     asyncio.create_task(check_signals())
     await dp.start_polling(bot)
 
-# === START EVERYTHING ===
+# === RUN ===
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     start()
+
 
 
 
