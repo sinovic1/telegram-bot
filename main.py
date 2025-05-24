@@ -1,67 +1,148 @@
+import asyncio
 import os
 import logging
-import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ParseMode
-from aiogram.utils import executor
-from aiogram.utils.exceptions import TelegramAPIError
-from flask import Flask
-from threading import Thread
+import traceback
+import pandas as pd
 import yfinance as yf
 
-# Enable logging
-logging.basicConfig(level=logging.INFO)
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
+from aiogram.types import Message
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.fsm.storage.memory import MemoryStorage
+from datetime import datetime
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# Environment variables
+# Load from environment variables
 API_TOKEN = os.getenv("API_TOKEN")
 USER_ID = int(os.getenv("USER_ID"))
 
-# Bot and dispatcher setup
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(bot)
+# Bot setup
+bot = Bot(token=API_TOKEN, session=AiohttpSession(), parse_mode=ParseMode.HTML)
+dp = Dispatcher(storage=MemoryStorage())
 
-# Flask app to keep Koyeb instance alive
-app = Flask(__name__)
-@app.route("/")
-def index():
-    return "Bot is running!"
-def run_flask():
-    app.run(host="0.0.0.0", port=8080)
+# Logger
+logging.basicConfig(level=logging.INFO)
 
-# Status command
-@dp.message_handler(commands=['status'])
-async def status_handler(message: types.Message):
-    if message.from_user.id != USER_ID:
-        return
-    await message.reply("✅ Bot is still running and monitoring the market.")
+# Strategy thresholds
+RSI_OVERSOLD = 30
+RSI_OVERBOUGHT = 70
 
-# Background task for signals
-async def check_signals():
-    await bot.delete_webhook(drop_pending_updates=True)
-    while True:
+# Forex pairs
+PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "USDCHF=X", "AUDUSD=X", "USDCAD=X"]
+
+# ---- Strategy Calculation ----
+
+def analyze_data(df):
+    signals = {}
+
+    # EMA
+    df['EMA20'] = df['Close'].ewm(span=20).mean()
+
+    # MACD
+    df['EMA12'] = df['Close'].ewm(span=12).mean()
+    df['EMA26'] = df['Close'].ewm(span=26).mean()
+    df['MACD'] = df['EMA12'] - df['EMA26']
+    df['Signal'] = df['MACD'].ewm(span=9).mean()
+
+    # Bollinger Bands
+    df['MiddleBB'] = df['Close'].rolling(window=20).mean()
+    df['StdDev'] = df['Close'].rolling(window=20).std()
+    df['UpperBB'] = df['MiddleBB'] + (df['StdDev'] * 2)
+    df['LowerBB'] = df['MiddleBB'] - (df['StdDev'] * 2)
+
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # Take last row
+    row = df.iloc[-1]
+    price = row['Close']
+
+    # Strategy agreement counter
+    agreement = []
+
+    if row['RSI'] < RSI_OVERSOLD:
+        agreement.append("RSI")
+
+    if row['MACD'] > row['Signal']:
+        agreement.append("MACD")
+
+    if price > row['EMA20']:
+        agreement.append("EMA")
+
+    if price < row['LowerBB']:
+        agreement.append("Bollinger")
+
+    if len(agreement) >= 2:
+        sl = round(price - (price * 0.005), 5)
+        tp1 = round(price + (price * 0.005), 5)
+        tp2 = round(price + (price * 0.010), 5)
+        tp3 = round(price + (price * 0.015), 5)
+
+        return {
+            "price": round(price, 5),
+            "tp": [tp1, tp2, tp3],
+            "sl": sl,
+            "strategies": agreement
+        }
+
+    return None
+
+# ---- Telegram Tasks ----
+
+async def send_signal():
+    for pair in PAIRS:
         try:
-            data = yf.download("EURUSD=X", period="1d", interval="15m")
-            if data.empty:
-                logging.warning("No data received for EURUSD=X.")
-            else:
-                last_price = data["Close"].iloc[-1]
-                avg_price = data["Close"].mean()
-                if last_price > avg_price:
-                    await bot.send_message(USER_ID, "📈 Signal: Buy EUR/USD")
-                else:
-                    await bot.send_message(USER_ID, "📉 Signal: Sell EUR/USD")
+            df = yf.download(pair, period="7d", interval="15m", progress=False)
+            signal = analyze_data(df)
+            if signal:
+                msg = (
+                    f"📈 <b>Signal for {pair.replace('=X', '')}</b>\n"
+                    f"💰 Entry: <code>{signal['price']}</code>\n"
+                    f"🎯 Take Profits:\n"
+                    f"  • TP1: <code>{signal['tp'][0]}</code>\n"
+                    f"  • TP2: <code>{signal['tp'][1]}</code>\n"
+                    f"  • TP3: <code>{signal['tp'][2]}</code>\n"
+                    f"🛡️ Stop Loss: <code>{signal['sl']}</code>\n"
+                    f"📊 Strategies: {', '.join(signal['strategies'])}"
+                )
+                await bot.send_message(USER_ID, msg)
         except Exception as e:
-            logging.error(f"Error while checking EURUSD=X: {e}")
-        await asyncio.sleep(300)
+            logging.error(f"{pair} Error: {e}")
 
-# Start everything
-async def on_startup(dp):
-    loop = asyncio.get_event_loop()
-    loop.create_task(check_signals())
-    Thread(target=run_flask).start()
+# ---- Safety Monitoring ----
 
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+async def loop_checker():
+    try:
+        await send_signal()
+    except Exception as e:
+        logging.error(f"Loop crashed: {traceback.format_exc()}")
+        await bot.send_message(USER_ID, f"⚠️ Bot crashed:\n<pre>{e}</pre>")
+
+# ---- Commands ----
+
+@dp.message()
+async def handle_status(msg: Message):
+    if msg.from_user.id == USER_ID and msg.text.lower() == "status":
+        await msg.answer("✅ Bot is running and monitoring the market.")
+
+# ---- Start Bot ----
+
+async def main():
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(loop_checker, "interval", minutes=15)
+    scheduler.start()
+
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
 
 
 
