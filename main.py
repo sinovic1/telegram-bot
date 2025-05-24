@@ -1,5 +1,6 @@
 import logging
 import asyncio
+import time
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.types import Message
@@ -7,86 +8,104 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
 import yfinance as yf
 
-# === Hardcoded BOT settings ===
+# === CONFIG ===
 API_TOKEN = "7923000946:AAHMosNsaHU1Oz-qTihaWlMDYqCV2vhHT1E"
 AUTHORIZED_USER_ID = 7469299312
 
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
-
 last_loop_time = datetime.utcnow()
 
-# === Trading check function ===
+# === CHECK MARKET ===
 async def loop_checker():
     global last_loop_time
     last_loop_time = datetime.utcnow()
     print(f"🔄 Checking market at {last_loop_time.isoformat()}")
 
     try:
-        df = yf.download("EURUSD=X", period="1d", interval="5m")
-        if df.empty:
+        df = yf.download("EURUSD=X", period="1d", interval="5m", progress=False)
+        if df.empty or len(df) < 30:
             return
 
         close = df["Close"]
+        if close.isnull().iloc[-1]:
+            return
+
         ema = close.ewm(span=20, adjust=False).mean()
-        rsi = 100 - (100 / (1 + (close.diff().clip(lower=0).rolling(14).mean() /
-                                close.diff().clip(upper=0).abs().rolling(14).mean())))
+        delta = close.diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+
         macd_line = close.ewm(span=12).mean() - close.ewm(span=26).mean()
         signal_line = macd_line.ewm(span=9).mean()
-        upper_band = close.rolling(20).mean() + 2 * close.rolling(20).std()
-        lower_band = close.rolling(20).mean() - 2 * close.rolling(20).std()
+
+        mean = close.rolling(window=20).mean()
+        std = close.rolling(window=20).std()
+        upper_band = mean + 2 * std
+        lower_band = mean - 2 * std
 
         signals = []
+        price = close.iloc[-1]
 
-        if rsi.iloc[-1] < 30 and close.iloc[-1] > ema.iloc[-1]:
-            signals.append("📈 RSI & EMA indicate BUY")
+        if rsi.iloc[-1] < 30 and price > ema.iloc[-1]:
+            signals.append("📈 RSI & EMA agree (BUY)")
         if macd_line.iloc[-1] > signal_line.iloc[-1] and rsi.iloc[-1] < 50:
-            signals.append("📈 MACD & RSI indicate BUY")
-        if close.iloc[-1] < lower_band.iloc[-1]:
-            signals.append("📈 Bollinger Bands suggest BUY")
-        if rsi.iloc[-1] > 70 and close.iloc[-1] < ema.iloc[-1]:
-            signals.append("📉 RSI & EMA indicate SELL")
+            signals.append("📈 MACD & RSI agree (BUY)")
+        if price < lower_band.iloc[-1]:
+            signals.append("📈 Price below Bollinger Band (BUY)")
+
+        if rsi.iloc[-1] > 70 and price < ema.iloc[-1]:
+            signals.append("📉 RSI & EMA agree (SELL)")
         if macd_line.iloc[-1] < signal_line.iloc[-1] and rsi.iloc[-1] > 50:
-            signals.append("📉 MACD & RSI indicate SELL")
-        if close.iloc[-1] > upper_band.iloc[-1]:
-            signals.append("📉 Bollinger Bands suggest SELL")
+            signals.append("📉 MACD & RSI agree (SELL)")
+        if price > upper_band.iloc[-1]:
+            signals.append("📉 Price above Bollinger Band (SELL)")
 
         if len(signals) >= 2:
-            msg = "📊 <b>New Forex Signal - EUR/USD</b>\n\n"
+            msg = f"📊 <b>New Signal: EUR/USD</b>\n\n"
             msg += "\n".join(signals[:3])
-            msg += "\n\n<b>Entry:</b> {:.5f}".format(close.iloc[-1])
-            msg += "\n<b>TP1:</b> {:.5f}".format(close.iloc[-1] * 1.001)
-            msg += "\n<b>TP2:</b> {:.5f}".format(close.iloc[-1] * 1.002)
-            msg += "\n<b>TP3:</b> {:.5f}".format(close.iloc[-1] * 1.003)
-            msg += "\n<b>SL:</b> {:.5f}".format(close.iloc[-1] * 0.998)
+            msg += f"\n\n<b>Entry:</b> {price:.5f}"
+            msg += f"\n<b>TP1:</b> {price * 1.001:.5f}"
+            msg += f"\n<b>TP2:</b> {price * 1.002:.5f}"
+            msg += f"\n<b>TP3:</b> {price * 1.003:.5f}"
+            msg += f"\n<b>SL:</b> {price * 0.998:.5f}"
 
-            await bot.send_message(chat_id=AUTHORIZED_USER_ID, text=msg, parse_mode=ParseMode.HTML)
+            await bot.send_message(chat_id=AUTHORIZED_USER_ID, text=msg)
 
     except Exception as e:
         logging.error(f"Error while checking EURUSD=X: {e}")
 
-# === /status command ===
+# === STATUS COMMAND ===
 @dp.message(F.text == "/status")
 async def status(message: Message):
     if message.from_user.id != AUTHORIZED_USER_ID:
         return
-    now = datetime.utcnow()
-    delay = (now - last_loop_time).total_seconds()
+    delay = (datetime.utcnow() - last_loop_time).total_seconds()
     if delay > 180:
-        await message.answer("⚠️ Warning: Bot loop seems delayed or frozen!")
+        await message.answer("⚠️ Bot may be frozen (last check >3 mins ago).")
     else:
-        await message.answer("✅ Bot is running and monitoring the market.")
+        await message.answer("✅ Bot is alive and working normally.")
 
-# === Startup function ===
+# === MAIN FUNCTION ===
 async def main():
     logging.basicConfig(level=logging.INFO)
+
+    # 🧹 Force webhook clearing
+    await bot.delete_webhook(drop_pending_updates=True)
+    print("✅ Webhook cleared")
+    await asyncio.sleep(3)  # ⏳ wait to ensure old polling stops
+
     scheduler.add_job(loop_checker, trigger="interval", minutes=1)
     scheduler.start()
+
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
