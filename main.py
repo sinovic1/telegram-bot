@@ -1,105 +1,114 @@
 import asyncio
 import logging
+import time
 import pandas as pd
-import yfinance as yf
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
+from aiogram.utils.exceptions import TelegramAPIError
 from flask import Flask
 import threading
-import time
-import os
+import yfinance as yf
 
-API_TOKEN = os.getenv("BOT_TOKEN")
-USER_ID = int(os.getenv("USER_ID"))
+# ✅ Hardcoded credentials
+API_TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
+USER_ID = 7469299312
 
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
 
 app = Flask(__name__)
 
-# Health check route
 @app.route('/')
-def index():
+def home():
     return 'Bot is running!'
 
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+# === STRATEGIES ===
+def rsi_strategy(df):
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+    return df['RSI'].iloc[-1] < 30 or df['RSI'].iloc[-1] > 70
 
-# Start Flask server in another thread
-threading.Thread(target=run_flask).start()
+def macd_strategy(df):
+    df['EMA12'] = df['Close'].ewm(span=12).mean()
+    df['EMA26'] = df['Close'].ewm(span=26).mean()
+    df['MACD'] = df['EMA12'] - df['EMA26']
+    df['Signal'] = df['MACD'].ewm(span=9).mean()
+    return df['MACD'].iloc[-1] > df['Signal'].iloc[-1]
 
-# Initialize timestamp to check if bot is stuck
-last_signal_time = time.time()
+def ema_strategy(df):
+    df['EMA20'] = df['Close'].ewm(span=20).mean()
+    return df['Close'].iloc[-1] > df['EMA20'].iloc[-1]
 
-def update_last_signal_time():
-    global last_signal_time
-    last_signal_time = time.time()
+def bollinger_strategy(df):
+    df['MA20'] = df['Close'].rolling(window=20).mean()
+    std = df['Close'].rolling(window=20).std()
+    df['UpperBB'] = df['MA20'] + (2 * std)
+    df['LowerBB'] = df['MA20'] - (2 * std)
+    return df['Close'].iloc[-1] < df['LowerBB'].iloc[-1] or df['Close'].iloc[-1] > df['UpperBB'].iloc[-1]
 
-async def send_warning_if_stuck():
-    while True:
-        await asyncio.sleep(300)  # Check every 5 minutes
-        if time.time() - last_signal_time > 360:
-            try:
-                await bot.send_message(chat_id=USER_ID, text="⚠️ Warning: Bot seems to be stuck or delayed!")
-            except Exception as e:
-                logging.error(f"Failed to send stuck warning: {e}")
-
-# Signal logic here
-def analyze_signal(symbol):
-    try:
-        df = yf.download(symbol, period='1d', interval='5m')
-        if df.empty:
-            raise ValueError("No data received")
-
-        # Bollinger Bands
-        df["MiddleBB"] = df["Close"].rolling(window=20).mean()
-        df["UpperBB"] = df["MiddleBB"] + 2 * df["Close"].rolling(window=20).std()
-        df["LowerBB"] = df["MiddleBB"] - 2 * df["Close"].rolling(window=20).std()
-
-        last_close = df["Close"].iloc[-1]
-        upper = df["UpperBB"].iloc[-1]
-        lower = df["LowerBB"].iloc[-1]
-
-        signal = None
-        if last_close < lower:
-            signal = "🔵 BUY signal!"
-        elif last_close > upper:
-            signal = "🔴 SELL signal!"
-
-        if signal:
-            update_last_signal_time()
-            return f"📈 <b>{symbol}</b>\n{signal}\nPrice: {last_close:.5f}"
-    except Exception as e:
-        logging.error(f"{symbol} Error: {e}")
-    return None
-
-@dp.message()
-async def handle_message(message: types.Message):
-    if message.chat.id != USER_ID:
-        return
-    if message.text.lower() == "/status":
-        await message.reply("✅ Bot is running and monitoring the market.")
-
-async def check_market_loop():
+# === MAIN LOGIC ===
+async def check_signals():
     pairs = ["EURUSD=X"]
     while True:
-        for symbol in pairs:
-            signal = analyze_signal(symbol)
-            if signal:
-                try:
-                    await bot.send_message(chat_id=USER_ID, text=signal)
-                except Exception as e:
-                    logging.error(f"Failed to send message: {e}")
-        await asyncio.sleep(300)
+        try:
+            for symbol in pairs:
+                df = yf.download(symbol, interval="5m", period="1d")
+                if df.empty or 'Close' not in df:
+                    logging.error(f"{symbol} Error: No close data")
+                    continue
+
+                signals = []
+                if rsi_strategy(df): signals.append("RSI")
+                if macd_strategy(df): signals.append("MACD")
+                if ema_strategy(df): signals.append("EMA")
+                if bollinger_strategy(df): signals.append("BOLL")
+
+                if len(signals) >= 2:
+                    price = df['Close'].iloc[-1]
+                    msg = (
+                        f"📊 <b>Signal for {symbol.replace('=X', '')}</b>\n\n"
+                        f"📈 Entry: <b>{price:.4f}</b>\n"
+                        f"🎯 Take Profit 1: <b>{price * 1.002:.4f}</b>\n"
+                        f"🎯 Take Profit 2: <b>{price * 1.004:.4f}</b>\n"
+                        f"🎯 Take Profit 3: <b>{price * 1.006:.4f}</b>\n"
+                        f"🛑 Stop Loss: <b>{price * 0.998:.4f}</b>\n"
+                        f"🧠 Strategies: {', '.join(signals)}"
+                    )
+                    await bot.send_message(chat_id=USER_ID, text=msg)
+
+            await asyncio.sleep(300)  # every 5 minutes
+
+        except Exception as e:
+            logging.exception(f"Signal check failed: {e}")
+            await bot.send_message(chat_id=USER_ID, text="⚠️ Bot encountered an error.")
+
+# === STATUS COMMAND ===
+@dp.message()
+async def cmd_status(message: types.Message):
+    if message.chat.id == USER_ID and message.text.lower() == "status":
+        await message.answer("✅ Bot is running and monitoring the market.")
+
+# === THREAD START ===
+def start_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+def start():
+    threading.Thread(target=start_flask).start()
+    asyncio.run(main())
 
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    asyncio.create_task(send_warning_if_stuck())
-    asyncio.create_task(check_market_loop())
+    await bot.delete_webhook(drop_pending_updates=True)
+    asyncio.create_task(check_signals())
     await dp.start_polling(bot)
 
+# === START EVERYTHING ===
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.basicConfig(level=logging.INFO)
+    start()
+
 
 
 
