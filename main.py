@@ -1,106 +1,99 @@
+import os
 import logging
 import asyncio
-import time
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
-from aiogram.types import Message
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
 import yfinance as yf
+from flask import Flask
+from threading import Thread
 
-# === CONFIG ===
+# ====== CONFIG ======
 API_TOKEN = "7923000946:AAHMosNsaHU1Oz-qTihaWlMDYqCV2vhHT1E"
-AUTHORIZED_USER_ID = 7469299312
+ALLOWED_USER_ID = 7469299312  # Your Telegram ID
+# =====================
 
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher()
-scheduler = AsyncIOScheduler()
-last_loop_time = datetime.utcnow()
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# === CHECK MARKET ===
-async def loop_checker():
-    global last_loop_time
-    last_loop_time = datetime.utcnow()
-    print(f"🔄 Checking market at {last_loop_time.isoformat()}")
+# Setup Bot & Dispatcher
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher(storage=MemoryStorage())
 
+# Flask App to keep service alive
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Bot is running."
+
+def run_web():
+    app.run(host='0.0.0.0', port=8080)
+
+# /status command
+@dp.message()
+async def status_handler(message: types.Message):
+    if message.text.lower() == "status" and message.from_user.id == ALLOWED_USER_ID:
+        await message.answer("✅ Bot is active and running.")
+
+# Forex Signal Logic
+def get_signals():
     try:
-        df = yf.download("EURUSD=X", period="1d", interval="5m", progress=False)
-        if df.empty or len(df) < 30:
-            return
-
+        df = yf.download("EURUSD=X", period="1d", interval="1m")
+        if df.empty:
+            return None
         close = df["Close"]
-        if close.isnull().iloc[-1]:
-            return
-
-        ema = close.ewm(span=20, adjust=False).mean()
-        delta = close.diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain / loss
-        rsi = 100 - (100 / (1 + rs))
-
-        macd_line = close.ewm(span=12).mean() - close.ewm(span=26).mean()
-        signal_line = macd_line.ewm(span=9).mean()
-
-        mean = close.rolling(window=20).mean()
-        std = close.rolling(window=20).std()
-        upper_band = mean + 2 * std
-        lower_band = mean - 2 * std
+        if len(close) < 26:
+            return None
+        ema_fast = close.ewm(span=12, adjust=False).mean()
+        ema_slow = close.ewm(span=26, adjust=False).mean()
+        macd = ema_fast - ema_slow
+        rsi = 100 - (100 / (1 + close.pct_change().dropna().rolling(window=14).mean()))
+        last_macd = macd.iloc[-1]
+        last_rsi = rsi.iloc[-1]
+        last_price = close.iloc[-1]
 
         signals = []
-        price = close.iloc[-1]
 
-        if rsi.iloc[-1] < 30 and price > ema.iloc[-1]:
-            signals.append("📈 RSI & EMA agree (BUY)")
-        if macd_line.iloc[-1] > signal_line.iloc[-1] and rsi.iloc[-1] < 50:
-            signals.append("📈 MACD & RSI agree (BUY)")
-        if price < lower_band.iloc[-1]:
-            signals.append("📈 Price below Bollinger Band (BUY)")
-
-        if rsi.iloc[-1] > 70 and price < ema.iloc[-1]:
-            signals.append("📉 RSI & EMA agree (SELL)")
-        if macd_line.iloc[-1] < signal_line.iloc[-1] and rsi.iloc[-1] > 50:
-            signals.append("📉 MACD & RSI agree (SELL)")
-        if price > upper_band.iloc[-1]:
-            signals.append("📉 Price above Bollinger Band (SELL)")
+        if last_macd > 0:
+            signals.append("MACD")
+        if last_rsi < 30:
+            signals.append("RSI")
 
         if len(signals) >= 2:
-            msg = f"📊 <b>New Signal: EUR/USD</b>\n\n"
-            msg += "\n".join(signals[:3])
-            msg += f"\n\n<b>Entry:</b> {price:.5f}"
-            msg += f"\n<b>TP1:</b> {price * 1.001:.5f}"
-            msg += f"\n<b>TP2:</b> {price * 1.002:.5f}"
-            msg += f"\n<b>TP3:</b> {price * 1.003:.5f}"
-            msg += f"\n<b>SL:</b> {price * 0.998:.5f}"
-
-            await bot.send_message(chat_id=AUTHORIZED_USER_ID, text=msg)
+            tp1 = round(last_price + 0.0020, 5)
+            tp2 = round(last_price + 0.0040, 5)
+            tp3 = round(last_price + 0.0060, 5)
+            sl = round(last_price - 0.0020, 5)
+            return f"📈 <b>BUY EUR/USD</b>\nEntry: {last_price:.5f}\nTP1: {tp1}\nTP2: {tp2}\nTP3: {tp3}\nSL: {sl}\nIndicators: {', '.join(signals)}"
+        return None
 
     except Exception as e:
-        logging.error(f"Error while checking EURUSD=X: {e}")
+        logger.error(f"Error while checking EURUSD=X: {e}")
+        return None
 
-# === STATUS COMMAND ===
-@dp.message(F.text == "/status")
-async def status(message: Message):
-    if message.from_user.id != AUTHORIZED_USER_ID:
-        return
-    delay = (datetime.utcnow() - last_loop_time).total_seconds()
-    if delay > 180:
-        await message.answer("⚠️ Bot may be frozen (last check >3 mins ago).")
-    else:
-        await message.answer("✅ Bot is alive and working normally.")
+# Auto checker
+async def loop_checker():
+    logger.info("🔄 Checking market...")
+    signal = get_signals()
+    if signal:
+        try:
+            await bot.send_message(chat_id=ALLOWED_USER_ID, text=signal)
+        except Exception as e:
+            logger.error(f"❌ Failed to send signal: {e}")
 
-# === MAIN FUNCTION ===
+# Background scheduler
+scheduler = AsyncIOScheduler()
+scheduler.add_job(loop_checker, "interval", minutes=1)
+
+# Start everything
 async def main():
-    logging.basicConfig(level=logging.INFO)
-
-    # 🧹 Force webhook clearing
     await bot.delete_webhook(drop_pending_updates=True)
-    print("✅ Webhook cleared")
-    await asyncio.sleep(3)  # ⏳ wait to ensure old polling stops
-
-    scheduler.add_job(loop_checker, trigger="interval", minutes=1)
     scheduler.start()
-
+    Thread(target=run_web).start()
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
