@@ -1,108 +1,80 @@
-import logging
 import asyncio
+import logging
+import time
+import yfinance as yf
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
-from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from datetime import datetime
-import yfinance as yf
+from flask import Flask
+import threading
 
 API_TOKEN = "7923000946:AAGkHu782eQXxhLF4IU1yNCyJO5ruXZhUtc"
 ALLOWED_USER_ID = 7469299312
 
-# Logging
+# Setup logging
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Bot and Dispatcher
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+# Init bot
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-# Strategy logic
-def get_signals(data):
-    signals = []
+# Track last activity time
+last_check_time = time.time()
 
-    data["EMA20"] = data["Close"].ewm(span=20, adjust=False).mean()
-    ema_signal = "buy" if data["Close"].iloc[-1] > data["EMA20"].iloc[-1] else "sell"
+# Flask dummy server to keep port 8080 alive
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "Bot is alive"
+def run_web():
+    app.run(host="0.0.0.0", port=8080)
+threading.Thread(target=run_web).start()
 
-    delta = data["Close"].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=14).mean()
-    avg_loss = loss.rolling(window=14).mean()
-    rs = avg_gain / avg_loss
-    data["RSI"] = 100 - (100 / (1 + rs))
-    rsi_signal = "buy" if data["RSI"].iloc[-1] < 30 else "sell" if data["RSI"].iloc[-1] > 70 else "hold"
+# Trading strategy check (very basic for now)
+def check_strategy(data):
+    close = data["Close"]
+    if len(close) < 5:
+        return False
+    return close[-1] > close[-2] and close[-2] > close[-3]
 
-    exp1 = data["Close"].ewm(span=12, adjust=False).mean()
-    exp2 = data["Close"].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
-    macd_signal = "buy" if macd.iloc[-1] > signal.iloc[-1] else "sell"
-
-    data["SMA20"] = data["Close"].rolling(window=20).mean()
-    data["Upper"] = data["SMA20"] + 2 * data["Close"].rolling(window=20).std()
-    data["Lower"] = data["SMA20"] - 2 * data["Close"].rolling(window=20).std()
-    boll_signal = "buy" if data["Close"].iloc[-1] < data["Lower"].iloc[-1] else "sell" if data["Close"].iloc[-1] > data["Upper"].iloc[-1] else "hold"
-
-    for sig in [ema_signal, rsi_signal, macd_signal, boll_signal]:
-        if sig in ["buy", "sell"]:
-            signals.append(sig)
-
-    if signals.count("buy") >= 2:
-        return "BUY"
-    elif signals.count("sell") >= 2:
-        return "SELL"
-    return None
-
-async def send_signal(bot, action, price):
-    tp1 = round(price * (1.01 if action == "BUY" else 0.99), 5)
-    tp2 = round(price * (1.02 if action == "BUY" else 0.98), 5)
-    tp3 = round(price * (1.03 if action == "BUY" else 0.97), 5)
-    sl = round(price * (0.99 if action == "BUY" else 1.01), 5)
-
-    msg = (
-        f"📈 <b>Signal:</b> <code>{action}</code>\n"
-        f"💰 <b>Entry:</b> {price:.5f}\n"
-        f"🎯 <b>TP1:</b> {tp1}\n"
-        f"🎯 <b>TP2:</b> {tp2}\n"
-        f"🎯 <b>TP3:</b> {tp3}\n"
-        f"⛔ <b>SL:</b> {sl}"
-    )
-    await bot.send_message(ALLOWED_USER_ID, msg, parse_mode=ParseMode.HTML)
-
-# Background loop
+# Loop checker for trading
 async def loop_checker():
+    global last_check_time
     try:
-        print(f"🔄 Checking market at {datetime.utcnow().isoformat()}")
-        data = yf.download("EURUSD=X", period="30m", interval="1m", progress=False, auto_adjust=True)
+        logger.info(f"🔄 Checking market at {time.strftime('%Y-%m-%dT%H:%M:%S')}")
+        symbol = "EURUSD=X"
+        data = yf.download(symbol, period="7d", interval="1h")
         if data.empty:
-            return
-
-        signal = get_signals(data)
-        if signal:
-            await send_signal(bot, signal, data["Close"].iloc[-1])
+            raise ValueError("No data fetched")
+        if check_strategy(data):
+            await bot.send_message(ALLOWED_USER_ID, f"📈 Signal detected for <b>{symbol}</b>")
+        last_check_time = time.time()
     except Exception as e:
-        logging.error(f"Error while checking EURUSD=X: {e}")
+        logger.error(f"Error while checking {symbol}: {e}")
 
-# /status command handler
-@dp.message(Command("status"))
-async def status_handler(message: Message):
-    if message.from_user.id != ALLOWED_USER_ID:
-        return
-    await message.answer("✅ Bot is running and monitoring!")
+# APScheduler
+scheduler = AsyncIOScheduler()
+scheduler.add_job(loop_checker, "interval", minutes=1)
+scheduler.start()
 
-# Main entry point
+# /status command
+@dp.message(lambda message: message.text == "/status" and message.from_user.id == ALLOWED_USER_ID)
+async def status_handler(message: types.Message):
+    delay = time.time() - last_check_time
+    status = "✅ Everything is working fine." if delay < 120 else "⚠️ Warning: Loop may be frozen!"
+    await message.answer(status)
+
+# Start polling
 async def main():
-    print("✅ Webhook cleared")
     await bot.delete_webhook(drop_pending_updates=True)
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(loop_checker, "interval", minutes=1)
-    scheduler.start()
+    logger.info("✅ Webhook cleared")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 
 
 
