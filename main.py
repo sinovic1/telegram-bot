@@ -1,28 +1,29 @@
 import os
-import logging
 import asyncio
+import logging
 import yfinance as yf
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, Router, F
+from aiogram.types import Message, BotCommand
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramConflictError
-from aiogram.types import BotCommand
-from aiogram.utils.markdown import hbold
 
 API_TOKEN = "7923000946:AAEx8TZsaIl6GL7XUwPGEM6a6-mBNfKwUz8"
 USER_ID = 7469299312
 
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
 async def clear_webhook():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         print("✅ Webhook cleared successfully")
     except Exception as e:
-        print("❌ Failed to clear webhook:", e)
+        print(f"❌ Failed to clear webhook: {e}")
 
-@dp.message(commands=['status'])
-async def status_command(message: types.Message):
+@router.message(F.text == "/status")
+async def status_command(message: Message):
     if message.chat.id == USER_ID:
         await message.answer("✅ Bot is running and monitoring the market.")
 
@@ -40,13 +41,13 @@ def get_signal():
 async def send_alert():
     signal = get_signal()
     if signal:
-        await bot.send_message(chat_id=USER_ID, text=signal, parse_mode=ParseMode.HTML)
+        await bot.send_message(chat_id=USER_ID, text=signal)
 
 async def monitor():
     while True:
         try:
             await send_alert()
-            await asyncio.sleep(900)  # 15 minutes
+            await asyncio.sleep(900)
         except Exception as e:
             logging.error(f"Monitoring error: {e}")
             await asyncio.sleep(30)
@@ -58,13 +59,12 @@ async def main():
     asyncio.create_task(monitor())
     try:
         await dp.start_polling(bot)
-    except TelegramConflictError as e:
-        logging.error("Bot conflict detected. Another instance might be running.")
-    except Exception as e:
-        logging.error(f"Unexpected error: {e}")
+    except TelegramConflictError:
+        logging.error("❗ Another instance of the bot is already polling Telegram.")
 
 if __name__ == '__main__':
     asyncio.run(main())
+
 
 
 
