@@ -1,110 +1,93 @@
 import logging
 import asyncio
-import yfinance as yf
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
-from aiogram.fsm.strategy import FSMStrategy
+from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from datetime import datetime
-from flask import Flask
-import threading
+import yfinance as yf
 
-# 🔒 Your hard-coded credentials (safe only for testing, don’t expose in public!)
+# === Hardcoded BOT settings ===
 API_TOKEN = "7923000946:AAHMosNsaHU1Oz-qTihaWlMDYqCV2vhHT1E"
-USER_ID = 7469299312  # Replace if different
+AUTHORIZED_USER_ID = 7469299312
 
-# Initialize logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Setup bot
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
-dp = Dispatcher(fsm_strategy=FSMStrategy.CHAT)
+dp = Dispatcher()
+scheduler = AsyncIOScheduler()
 
-# Setup Flask app to keep Koyeb alive
-app = Flask(__name__)
+last_loop_time = datetime.utcnow()
 
-@app.route('/')
-def home():
-    return "Bot is alive!"
+# === Trading check function ===
+async def loop_checker():
+    global last_loop_time
+    last_loop_time = datetime.utcnow()
+    print(f"🔄 Checking market at {last_loop_time.isoformat()}")
 
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
-
-# Track last signal time for health check
-last_signal_time = None
-
-# Strategies (simplified example)
-def check_signals():
-    global last_signal_time
     try:
-        df = yf.download("EURUSD=X", period="1d", interval="1m")
+        df = yf.download("EURUSD=X", period="1d", interval="5m")
         if df.empty:
-            return None
+            return
 
         close = df["Close"]
-        ema = close.ewm(span=10).mean()
+        ema = close.ewm(span=20, adjust=False).mean()
         rsi = 100 - (100 / (1 + (close.diff().clip(lower=0).rolling(14).mean() /
                                 close.diff().clip(upper=0).abs().rolling(14).mean())))
+        macd_line = close.ewm(span=12).mean() - close.ewm(span=26).mean()
+        signal_line = macd_line.ewm(span=9).mean()
+        upper_band = close.rolling(20).mean() + 2 * close.rolling(20).std()
+        lower_band = close.rolling(20).mean() - 2 * close.rolling(20).std()
 
-        signal = []
+        signals = []
 
         if rsi.iloc[-1] < 30 and close.iloc[-1] > ema.iloc[-1]:
-            signal.append("BUY")
-
+            signals.append("📈 RSI & EMA indicate BUY")
+        if macd_line.iloc[-1] > signal_line.iloc[-1] and rsi.iloc[-1] < 50:
+            signals.append("📈 MACD & RSI indicate BUY")
+        if close.iloc[-1] < lower_band.iloc[-1]:
+            signals.append("📈 Bollinger Bands suggest BUY")
         if rsi.iloc[-1] > 70 and close.iloc[-1] < ema.iloc[-1]:
-            signal.append("SELL")
+            signals.append("📉 RSI & EMA indicate SELL")
+        if macd_line.iloc[-1] < signal_line.iloc[-1] and rsi.iloc[-1] > 50:
+            signals.append("📉 MACD & RSI indicate SELL")
+        if close.iloc[-1] > upper_band.iloc[-1]:
+            signals.append("📉 Bollinger Bands suggest SELL")
 
-        if len(signal) >= 2:
-            last_signal_time = datetime.utcnow()
-            entry = close.iloc[-1]
-            tp1 = round(entry * 1.002, 5)
-            tp2 = round(entry * 1.004, 5)
-            tp3 = round(entry * 1.006, 5)
-            sl = round(entry * 0.996, 5)
-            return f"""
-📈 <b>EUR/USD Signal</b>
-Type: <b>{signal[0]}</b>
-Entry: <b>{entry}</b>
-TP1: <b>{tp1}</b>
-TP2: <b>{tp2}</b>
-TP3: <b>{tp3}</b>
-SL: <b>{sl}</b>
-"""
+        if len(signals) >= 2:
+            msg = "📊 <b>New Forex Signal - EUR/USD</b>\n\n"
+            msg += "\n".join(signals[:3])
+            msg += "\n\n<b>Entry:</b> {:.5f}".format(close.iloc[-1])
+            msg += "\n<b>TP1:</b> {:.5f}".format(close.iloc[-1] * 1.001)
+            msg += "\n<b>TP2:</b> {:.5f}".format(close.iloc[-1] * 1.002)
+            msg += "\n<b>TP3:</b> {:.5f}".format(close.iloc[-1] * 1.003)
+            msg += "\n<b>SL:</b> {:.5f}".format(close.iloc[-1] * 0.998)
+
+            await bot.send_message(chat_id=AUTHORIZED_USER_ID, text=msg, parse_mode=ParseMode.HTML)
+
     except Exception as e:
-        logger.error(f"Error while checking EURUSD=X: {e}")
-    return None
+        logging.error(f"Error while checking EURUSD=X: {e}")
 
-# Status command
-@dp.message(lambda msg: msg.text == "/status" and msg.from_user.id == USER_ID)
-async def status_handler(message: types.Message):
-    await message.answer("✅ Bot is running and monitoring the market.")
+# === /status command ===
+@dp.message(F.text == "/status")
+async def status(message: Message):
+    if message.from_user.id != AUTHORIZED_USER_ID:
+        return
+    now = datetime.utcnow()
+    delay = (now - last_loop_time).total_seconds()
+    if delay > 180:
+        await message.answer("⚠️ Warning: Bot loop seems delayed or frozen!")
+    else:
+        await message.answer("✅ Bot is running and monitoring the market.")
 
-# Main loop
+# === Startup function ===
 async def main():
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("✅ Webhook cleared")
-    except Exception as e:
-        logger.warning(f"Webhook clear failed: {e}")
-
-    scheduler = AsyncIOScheduler()
-    
-    async def loop_checker():
-        logger.info(f"🔄 Checking market at {datetime.utcnow().isoformat()}")
-        signal = check_signals()
-        if signal:
-            await bot.send_message(USER_ID, signal, parse_mode=ParseMode.HTML)
-
-    scheduler.add_job(loop_checker, "interval", minutes=1)
+    logging.basicConfig(level=logging.INFO)
+    scheduler.add_job(loop_checker, trigger="interval", minutes=1)
     scheduler.start()
-
     await dp.start_polling(bot)
 
-# Start everything
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
     asyncio.run(main())
+
 
 
 
